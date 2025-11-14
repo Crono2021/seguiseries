@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 Bot de Telegram para gestionar una lista de series usando TMDB.
-VERSIÓN SIN CONTRASEÑA — TODO ABIERTO
+Versión SIN contraseña: todos los comandos son públicos.
+/lista y las fichas son públicas, /add y /borrar también.
 """
 
 import os
@@ -14,7 +15,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, CallbackQueryHandler,
-    ContextTypes, filters
+    ContextTypes, filters, MessageHandler
 )
 
 # =============================
@@ -72,7 +73,7 @@ def load_db() -> Dict[str, Any]:
     else:
         db = {}
 
-    # Limpiar restos antiguos de autenticación si existieran
+    # Limpia restos antiguos de autenticación si existiera
     if "_auth" in db:
         del db["_auth"]
 
@@ -178,11 +179,11 @@ def text_progress(emitted_nums, completed):
     )
 
 # =============================
-# MENÚ / START
+# START / MENÚ
 # =============================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "📺 Bienvenido al bot de series.\n\n"
+        "📺 Bienvenido al bot de seguimiento de series.\n\n"
         "Comandos disponibles:\n"
         "• /add <TMDBID> <S1S2...>\n"
         "• /add <Título> <Año?> <S1S2>\n"
@@ -243,19 +244,17 @@ async def add_series(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cid = str(update.effective_chat.id)
     items = get_items(db, cid)
 
-    # NO confiamos en context.args; parseamos el texto a mano
-    full_text = (update.message.text or "").strip()
-    parts = full_text.split()
-    args = parts[1:]  # quitamos "/add"
+    args = context.args  # esto debe contener lo que va después de /add
 
     if not args:
         await update.message.reply_text(
-            "Uso: /add <ID> S1S2 o /add <Título> <Año?> S1S2"
+            "Uso: /add <ID> S1S2 o /add <Título> <Año?> S1S2\n"
+            "Ejemplo: /add La casa del dragón 2022 S1S2"
         )
         return
 
-    # Caso 1: primer arg es numérico → TMDB ID
     if re.fullmatch(r"\d+", args[0]):
+        # Caso 1: /add 12345 S1S2
         tmdb_id = int(args[0])
         seasons = parse_seasons_string("".join(args[1:]))
         try:
@@ -266,7 +265,7 @@ async def add_series(update: Update, context: ContextTypes.DEFAULT_TYPE):
         title = d.get("name") or d.get("original_name") or f"TMDB {tmdb_id}"
         year = (d.get("first_air_date") or "").split("-")[0]
     else:
-        # Caso 2: título + año opcional + temporadas
+        # Caso 2: /add Título Año S1S2
         title, year, seasons = extract_title_year_and_seasons(args)
         if not title:
             await update.message.reply_text(
@@ -285,9 +284,7 @@ async def add_series(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Actualizar o crear
     for it in items:
         if int(it["tmdb_id"]) == tmdb_id or normalize(it["title"]) == normalize(title):
-            it["completed"] = sorted(
-                set((it.get("completed") or []) + seasons)
-            )
+            it["completed"] = sorted(set((it.get("completed") or []) + seasons))
             it["title"] = title
             it["year"] = year
             save_db(db)
@@ -313,10 +310,7 @@ async def borrar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cid = str(update.effective_chat.id)
     items = get_items(db, cid)
 
-    full_text = (update.message.text or "").strip()
-    parts = full_text.split()
-    args = parts[1:]  # quitamos "/borrar"
-
+    args = context.args
     if not args:
         await update.message.reply_text("Uso: /borrar <ID|título>")
         return
@@ -326,10 +320,7 @@ async def borrar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     new = [
         it
         for it in items
-        if not (
-            q == str(it["tmdb_id"])
-            or normalize(it["title"]) == q
-        )
+        if not (q == str(it["tmdb_id"]) or normalize(it["title"]) == q)
     ]
 
     if len(new) < len(items):
@@ -511,7 +502,7 @@ def main():
     app.add_handler(CallbackQueryHandler(turn_page, pattern="^page:"))
     app.add_handler(CallbackQueryHandler(show_series, pattern="^show:"))
 
-    print("🚀 Bot en marcha (sin contraseña, /add parseando texto crudo)…")
+    print("🚀 Bot en marcha (sin contraseña)…")
     app.run_polling()
 
 if __name__ == "__main__":
