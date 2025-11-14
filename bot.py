@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Bot de Telegram para gestionar una lista de series usando TMDB.
-# Versión SIN contraseña: todos los comandos son públicos.
-# Las listas son por chat: cada grupo/privado tiene su propia base de datos.
+"""
+Bot de Telegram para gestionar una lista de series usando TMDB.
+
+✔ Un solo JSON compartido en /mnt/series_db/series_data.json
+✔ Cada chat (usuario o grupo) tiene su propia lista (clave = chat_id)
+✔ Sin contraseña, todos los comandos son públicos.
+"""
 
 import os
-import json, re, requests
+import json
+import re
+import requests
 from pathlib import Path
 from datetime import datetime, date
 from typing import Dict, List, Optional, Any
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -19,34 +26,42 @@ from telegram.ext import (
 # =============================
 # VARIABLES DE ENTORNO
 # =============================
-TELEGRAM_BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 TMDB_API_KEY = os.getenv("TMDB_API_KEY")
 
-if not TELEGRAM_BOT_TOKEN:
+if not BOT_TOKEN:
     raise RuntimeError("❌ Falta la variable de entorno BOT_TOKEN")
 
 if not TMDB_API_KEY:
     raise RuntimeError("❌ Falta la variable de entorno TMDB_API_KEY")
 
 # =============================
-# BASE DE DATOS (PERSISTENTE)
+# BASE DE DATOS (PERSISTENTE EN VOLUMEN)
 # =============================
 
 # Directorio donde Railway monta el volumen
 DB_DIR = Path("/mnt/series_db")
 DB_DIR.mkdir(parents=True, exist_ok=True)
 
+# Archivo JSON único compartido por todos los chats
 DB_PATH = DB_DIR / "series_data.json"
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 IMG_BASE = "https://image.tmdb.org/t/p/w500"
 PAGE_SIZE = 10
 
-WEEKDAYS = ["lunes","martes","miércoles","jueves","viernes","sábado","domingo"]
-MONTHS = ["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"]
+WEEKDAYS = [
+    "lunes", "martes", "miércoles", "jueves",
+    "viernes", "sábado", "domingo"
+]
+MONTHS = [
+    "enero", "febrero", "marzo", "abril",
+    "mayo", "junio", "julio", "agosto",
+    "septiembre", "octubre", "noviembre", "diciembre"
+]
 
 # =============================
-# UTILIDADES
+# UTILIDADES GENERALES
 # =============================
 def format_date_natural(dstr: Optional[str]) -> Optional[str]:
     if not dstr:
@@ -61,22 +76,31 @@ def is_future(dstr: Optional[str]) -> bool:
     if not dstr:
         return False
     try:
-        return datetime.strptime(dstr,"%Y-%m-%d").date() > date.today()
+        return datetime.strptime(dstr, "%Y-%m-%d").date() > date.today()
     except Exception:
         return False
 
+# =============================
+# DB: CARGA / GUARDA
+# =============================
 def load_db() -> Dict[str, Any]:
-    if DB_PATH.exists():
-        try:
-            db = json.loads(DB_PATH.read_text(encoding="utf-8"))
-            if not isinstance(db, dict):
-                db = {}
-        except Exception:
+    """Carga el JSON completo. Estructura esperada:
+    {
+        "chat_id_1": { "items": [ ... ] },
+        "chat_id_2": { "items": [ ... ] }
+    }
+    """
+    if not DB_PATH.exists():
+        return {}
+
+    try:
+        db = json.loads(DB_PATH.read_text(encoding="utf-8"))
+        if not isinstance(db, dict):
             db = {}
-    else:
+    except Exception:
         db = {}
 
-    # Normalizamos estructura: {chat_id: {"items": [...] }}
+    # Normalizar estructura
     for k, v in list(db.items()):
         if isinstance(v, list):
             db[k] = {"items": v}
@@ -86,15 +110,17 @@ def load_db() -> Dict[str, Any]:
     return db
 
 def save_db(db: Dict[str, Any]) -> None:
-    # Por si acaso, asegurar directorio en cada guardado
+    """Guarda el JSON completo en el volumen."""
     DB_DIR.mkdir(parents=True, exist_ok=True)
     DB_PATH.write_text(json.dumps(db, ensure_ascii=False, indent=2), encoding="utf-8")
 
 def ensure_chat(db: Dict[str, Any], chat_id: str) -> None:
+    """Asegura que exista la clave de ese chat en el JSON."""
     if chat_id not in db:
         db[chat_id] = {"items": []}
 
-def get_items(db: Dict[str, Any], chat_id: str):
+def get_items(db: Dict[str, Any], chat_id: str) -> List[Dict[str, Any]]:
+    """Devuelve la lista de items para ese chat."""
     ensure_chat(db, chat_id)
     return db[chat_id]["items"]
 
@@ -122,6 +148,7 @@ def tmdb_search_tv(q: str) -> Dict:
     return r.json()
 
 def parse_seasons_string(s: str) -> List[int]:
+    """Extrae temporadas de un string tipo 'S1S2S3' o 's1s2'."""
     return sorted({int(x) for x in re.findall(r"[sS](\d+)", s or "")})
 
 def normalize(s: str) -> str:
@@ -159,7 +186,7 @@ def emitted_season_numbers(details: Dict) -> List[int]:
 
     return sorted(emitted)
 
-def mini_progress(emitted_nums, completed, current):
+def mini_progress(emitted_nums: List[int], completed: List[int], current: Optional[int]):
     cset = set(completed or [])
     parts = []
     for n in emitted_nums:
@@ -170,7 +197,7 @@ def mini_progress(emitted_nums, completed, current):
             parts.append(f"S{n} {mark}")
     return " ".join(parts)
 
-def text_progress(emitted_nums, completed):
+def text_progress(emitted_nums: List[int], completed: List[int]):
     have_all = len(emitted_nums) > 0 and all(
         n in set(completed or []) for n in emitted_nums
     )
@@ -181,11 +208,12 @@ def text_progress(emitted_nums, completed):
     )
 
 # =============================
-# START / MENÚ
+# COMANDOS / START / MENÚ
 # =============================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📺 Bienvenido al bot de seguimiento de series.\n\n"
+        "Cada chat tiene su propia lista.\n\n"
         "Comandos disponibles:\n"
         "• /add <TMDBID> <S1S2...>\n"
         "• /add <Título> <Año?> <S1S2>\n"
@@ -212,7 +240,7 @@ def extract_title_year_and_seasons(args: List[str]):
     year = None
     seasons_str = ""
 
-    # Último token con S1S2...
+    # Último token tipo S1S2...
     if re.search(r"[sS]\d+", args[-1]):
         seasons_str = args[-1]
         args = args[:-1]
@@ -226,7 +254,7 @@ def extract_title_year_and_seasons(args: List[str]):
     seasons = parse_seasons_string(seasons_str)
     return title, year, seasons
 
-def find_series_by_title_year(title, year):
+def find_series_by_title_year(title: str, year: Optional[str]):
     res = tmdb_search_tv(title)
     results = res.get("results", [])
     if not results:
@@ -252,8 +280,8 @@ async def add_series(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # Caso 1: /add 12345 S1S2
     if re.fullmatch(r"\d+", args[0]):
-        # Caso 1: /add 12345 S1S2
         tmdb_id = int(args[0])
         seasons = parse_seasons_string("".join(args[1:]))
         try:
@@ -263,8 +291,9 @@ async def add_series(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         title = d.get("name") or d.get("original_name") or f"TMDB {tmdb_id}"
         year = (d.get("first_air_date") or "").split("-")[0]
+
+    # Caso 2: /add Título Año S1S2
     else:
-        # Caso 2: /add Título Año S1S2
         title, year, seasons = extract_title_year_and_seasons(args)
         if not title:
             await update.message.reply_text(
@@ -330,7 +359,7 @@ async def borrar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No encontrada.")
 
 # =============================
-# LISTAR
+# LISTAR / PAGINACIÓN
 # =============================
 def make_list_keyboard(total: int, page: int) -> InlineKeyboardMarkup:
     start = page * PAGE_SIZE
@@ -376,8 +405,11 @@ def build_list_entry(it: Dict) -> str:
     if is_really_airing(d):
         ne = d.get("next_episode_to_air") or {}
         when = format_date_natural(ne.get("air_date"))
-        plat = ((d.get("networks") or [{}])[0].get("name"))
-        extra = f"📡 En emisión — T{current}\n🕓 Próximo episodio: {when} en {plat}"
+        networks = d.get("networks") or []
+        plat = networks[0].get("name") if networks else None
+        extra = f"📡 En emisión — T{current}"
+        if when and plat:
+            extra += f"\n🕓 Próximo episodio: {when} en {plat}"
     else:
         st = (d.get("status") or "").lower()
         extra = "📺 Finalizada" if st == "ended" else "⏳ Pendiente"
@@ -438,7 +470,7 @@ async def turn_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # =============================
-# FICHA
+# FICHA / DETALLE
 # =============================
 async def show_series(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -447,9 +479,13 @@ async def show_series(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = load_db()
     cid = str(q.message.chat_id)
     items = get_items(db, cid)
-    idx = int(q.data.split(":")[1])
-    entry = items[idx]
 
+    idx = int(q.data.split(":")[1])
+    if idx < 0 or idx >= len(items):
+        await q.message.reply_text("Esa serie ya no existe en la lista.")
+        return
+
+    entry = items[idx]
     tmdb_id = int(entry["tmdb_id"])
     d = tmdb_tv_details(tmdb_id)
 
@@ -490,7 +526,7 @@ async def show_series(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # MAIN
 # =============================
 def main():
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", menu))
@@ -501,7 +537,7 @@ def main():
     app.add_handler(CallbackQueryHandler(turn_page, pattern="^page:"))
     app.add_handler(CallbackQueryHandler(show_series, pattern="^show:"))
 
-    print("🚀 Bot en marcha (sin contraseña, con volumen)…")
+    print("🚀 Bot en marcha (sin contraseña, por chat, con volumen)…")
     app.run_polling()
 
 if __name__ == "__main__":
