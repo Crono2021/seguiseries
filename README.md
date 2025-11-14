@@ -1,45 +1,21 @@
-# Bot de series TMDB para Telegram (Railway + GitHub ready)
+# Bot de seguimiento de series (Telegram + TMDB)
 
-Este bot permite gestionar una lista de series usando TMDB. Soporta:
-
-- Añadir series por ID de TMDB o por título/año
-- Ver lista paginada (/lista)
-- Ver ficha con póster y sinopsis (botones)
-- Marcar temporadas completadas
-- Sistema de autenticación por código secreto para administrar
+Bot en Python para gestionar una lista de series por chat usando TMDB.
 
 ## Variables de entorno
 
-Debes definir:
+- `BOT_TOKEN`: token del bot de Telegram
+- `TMDB_API_KEY`: API key de TMDB
 
-- `BOT_TOKEN` → token del bot de Telegram
-- `TMDB_API_KEY` → API key de TMDB
+## Railway + Volumen persistente
 
-En desarrollo puedes usar un archivo `.env` o exportarlas en tu shell.
-En Railway se configuran desde la sección **Variables** del proyecto.
+1. Crea un volumen en Railway y móntalo en:
 
-## Persistencia de datos
+   `/mnt/series_db`
 
-La base de datos se guarda en:
+2. Sube este proyecto a GitHub y conéctalo a Railway.
+3. Configura las variables de entorno `BOT_TOKEN` y `TMDB_API_KEY`.
+4. Deploy y listo.
 
-- `/data/series_data.json`
-
-En Railway, la ruta `/data` es persistente entre despliegues y reinicios.
-
-## Despliegue en Railway
-
-1. Crea un repositorio en GitHub con estos archivos.
-2. En Railway: **New Project → Deploy from GitHub**.
-3. Elige el repositorio del bot.
-4. En **Variables**, añade:
-
-   - `BOT_TOKEN`
-   - `TMDB_API_KEY`
-
-5. Railway detectará el `Procfile` y levantará el worker con:
-
-   ```bash
-   worker: python bot.py
-   ```
-
-¡Listo! El bot estará ejecutándose 24/7 en Railway.
+Cada chat (grupo o privado) tendrá su propia lista de series almacenada en
+`/mnt/series_db/series_data.json` (persistente entre deploys).
