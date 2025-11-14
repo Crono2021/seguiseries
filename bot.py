@@ -63,7 +63,6 @@ def is_future(dstr: Optional[str]) -> bool:
         return False
 
 def load_db() -> Dict[str, Any]:
-    # Asegurar existencia de carpeta del volumen
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     if DB_PATH.exists():
@@ -474,7 +473,7 @@ async def turn_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
 
 # =============================
-# FICHA
+# FICHA (con AÑO)
 # =============================
 async def show_series(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -489,7 +488,10 @@ async def show_series(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tmdb_id = int(entry["tmdb_id"])
     d = tmdb_tv_details(tmdb_id)
 
-    title = d.get("name")
+    title = d.get("name") or entry.get("title", "—")
+    year = (d.get("first_air_date") or "").split("-")[0]
+    title_with_year = f"{title} ({year})" if year else title
+
     overview = (d.get("overview") or "Sinopsis no disponible.").strip()
     poster = d.get("poster_path")
 
@@ -505,7 +507,8 @@ async def show_series(update: Update, context: ContextTypes.DEFAULT_TYPE):
     progress = text_progress(emitted, completed)
 
     caption = (
-        f"<b>{title}</b>\n\n{overview}\n\n"
+        f"<b>{title_with_year}</b>\n\n"
+        f"{overview}\n\n"
         f"{mini}\n{progress}"
     )
 
