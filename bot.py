@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python33
 # -*- coding: utf-8 -*-
 """
 Bot de Telegram para gestionar una lista de series usando TMDB.
