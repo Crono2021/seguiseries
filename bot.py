@@ -2,8 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Bot de Telegram para gestionar una lista de series usando TMDB.
-Permite añadir series, marcar temporadas completadas y ver su progreso.
-/lista y las fichas son públicas, el resto requiere código secreto.
+VERSIÓN SIN CONTRASEÑA — TODO ABIERTO
 """
 
 import os
@@ -31,15 +30,13 @@ if not TMDB_API_KEY:
     raise RuntimeError("❌ Falta la variable TMDB_API_KEY")
 
 # =============================
-# BASE DE DATOS PERSISTENTE (VOLUMEN)
+# BASE DE DATOS (PERSISTENTE EN VOLUMEN)
 # =============================
-# Debe estar montado en Railway como volumen real
 DB_PATH = Path("/mnt/series_db/series_data.json")
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 IMG_BASE = "https://image.tmdb.org/t/p/w500"
 PAGE_SIZE = 10
-SECRET_CODE = "Tomodachi"
 
 WEEKDAYS = ["lunes","martes","miércoles","jueves","viernes","sábado","domingo"]
 MONTHS = ["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"]
@@ -73,15 +70,15 @@ def load_db() -> Dict[str, Any]:
     else:
         db = {}
 
-    if "_auth" not in db:
-        db["_auth"] = {}
+    # Conversiones antiguas
+    if "_auth" in db:
+        del db["_auth"]
 
     for k, v in list(db.items()):
-        if k == "_auth": continue
         if isinstance(v, list):
             db[k] = {"items": v}
-        if isinstance(v, dict) and "items" not in v:
-            v["items"] = v.get("items", [])
+        elif isinstance(v, dict) and "items" not in v:
+            v["items"] = []
 
     return db
 
@@ -171,60 +168,18 @@ def text_progress(emitted_nums, completed):
     return "✅ Tenemos todo hasta ahora" if have_all else "❌ Todavía nos queda por recopilar"
 
 # =============================
-# AUTENTICACIÓN
-# =============================
-async def ensure_auth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Optional[Dict[str, Any]]:
-    db = load_db()
-    cid = str(update.effective_chat.id)
-
-    if db.get("_auth", {}).get(cid):
-        return db
-
-    if update.message:
-        await update.message.reply_text(
-            "🔒 Bot bloqueado para comandos admin.\n"
-            "📋 Usa /lista.\n"
-            "🔑 Introduce la contraseña secreta."
-        )
-    return None
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    db = load_db()
-    cid = str(update.effective_chat.id)
-
-    if not db.get("_auth", {}).get(cid):
-        await update.message.reply_text(
-            "🔒 Bienvenido.\n"
-            "📋 Usa /lista.\n"
-            "🔑 Si eres admin, envía la contraseña."
-        )
-        return
-
-    await show_menu(update, context)
-
-async def handle_secret(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message:
-        return
-
-    db = load_db()
-    cid = str(update.effective_chat.id)
-
-    if db.get("_auth", {}).get(cid):
-        return  # Ya autorizado
-
-    text = (update.message.text or "").strip()
-
-    if text == SECRET_CODE:
-        db["_auth"][cid] = True
-        save_db(db)
-        await update.message.reply_text("✅ Acceso concedido")
-        await show_menu(update, context)
-    else:
-        await update.message.reply_text("❌ Código incorrecto.")
-
-# =============================
 # MENÚ
 # =============================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "📺 Bienvenido al bot de series.\n"
+        "Comandos disponibles:\n\n"
+        "• /add <TMDBID> <S1S2...>\n"
+        "• /add <Título> <Año?> <S1S2>\n"
+        "• /lista\n"
+        "• /borrar <tmdbid|título>"
+    )
+
 async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = (
         "📺 Menú\n\n"
@@ -232,23 +187,8 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /add <Título> <Año?> <S1S2S3>\n"
         "• /lista\n"
         "• /borrar <tmdbid|título>\n"
-        "• /bloquear\n"
     )
-
-    if update.message:
-        await update.message.reply_text(txt)
-    else:
-        await update.callback_query.edit_message_text(txt)
-
-async def bloquear(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    db = load_db()
-    cid = str(update.effective_chat.id)
-
-    if cid in db.get("_auth", {}):
-        del db["_auth"][cid]
-        save_db(db)
-
-    await update.message.reply_text("🔒 Bot bloqueado. Usa /lista para ver series.")
+    await update.message.reply_text(txt)
 
 # =============================
 # /add
@@ -286,10 +226,7 @@ def find_series_by_title_year(title, year):
     return results[0]
 
 async def add_series(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    db = await ensure_auth(update, context)
-    if not db:
-        return
-
+    db = load_db()
     cid = str(update.effective_chat.id)
     items = get_items(db, cid)
     args = context.args
@@ -342,10 +279,7 @@ async def add_series(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # /borrar
 # =============================
 async def borrar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    db = await ensure_auth(update, context)
-    if not db:
-        return
-
+    db = load_db()
     cid = str(update.effective_chat.id)
     items = get_items(db, cid)
 
@@ -365,7 +299,7 @@ async def borrar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No encontrada.")
 
 # =============================
-# LISTADO
+# LISTAR
 # =============================
 def make_list_keyboard(total: int, page: int) -> InlineKeyboardMarkup:
     start = page * PAGE_SIZE
@@ -470,7 +404,7 @@ async def turn_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
 
 # =============================
-# FICHA (con AÑO)
+# FICHA
 # =============================
 async def show_series(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -524,19 +458,16 @@ async def show_series(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # FIX: Captura SIEMPRE la contraseña
-    app.add_handler(MessageHandler(filters.TEXT, handle_secret))
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("add", add_series))
     app.add_handler(CommandHandler("borrar", borrar))
-    app.add_handler(CommandHandler("bloquear", bloquear))
     app.add_handler(CommandHandler("lista", list_series))
+    app.add_handler(CommandHandler("menu", show_menu))
 
     app.add_handler(CallbackQueryHandler(turn_page, pattern="^page:"))
     app.add_handler(CallbackQueryHandler(show_series, pattern="^show:"))
 
-    print("🚀 Bot en marcha…")
+    print("🚀 Bot en marcha (versión sin contraseña)…")
     app.run_polling()
 
 if __name__ == "__main__":
