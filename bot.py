@@ -183,7 +183,7 @@ async def ensure_auth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Opt
     if update.message:
         await update.message.reply_text(
             "🔒 Bot bloqueado para comandos admin.\n"
-            "📋 Usa /lista para ver contenido.\n"
+            "📋 Usa /lista.\n"
             "🔑 Introduce la contraseña secreta."
         )
     return None
@@ -210,9 +210,11 @@ async def handle_secret(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cid = str(update.effective_chat.id)
 
     if db.get("_auth", {}).get(cid):
-        return
+        return  # Ya autorizado
 
-    if (update.message.text or "").strip() == SECRET_CODE:
+    text = (update.message.text or "").strip()
+
+    if text == SECRET_CODE:
         db["_auth"][cid] = True
         save_db(db)
         await update.message.reply_text("✅ Acceso concedido")
@@ -241,6 +243,7 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def bloquear(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = load_db()
     cid = str(update.effective_chat.id)
+
     if cid in db.get("_auth", {}):
         del db["_auth"][cid]
         save_db(db)
@@ -521,12 +524,15 @@ async def show_series(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
+    # FIX: Captura SIEMPRE la contraseña
+    app.add_handler(MessageHandler(filters.TEXT, handle_secret))
+
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_secret))
     app.add_handler(CommandHandler("add", add_series))
     app.add_handler(CommandHandler("borrar", borrar))
     app.add_handler(CommandHandler("bloquear", bloquear))
     app.add_handler(CommandHandler("lista", list_series))
+
     app.add_handler(CallbackQueryHandler(turn_page, pattern="^page:"))
     app.add_handler(CallbackQueryHandler(show_series, pattern="^show:"))
 
