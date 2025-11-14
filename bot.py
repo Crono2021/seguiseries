@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # Bot de Telegram para gestionar series por TMDB
 # Listas independientes por chat_id
-# Persistencia REAL con volumen en /data
+# Persistencia REAL usando un volumen montado en /data
 
 import os
 import json, re, requests
@@ -29,8 +29,9 @@ if not TMDB_API_KEY:
     raise RuntimeError("❌ Falta la variable TMDB_API_KEY")
 
 # =============================
-# BASE DE DATOS — 100% PERSISTENTE
+# BASE DE DATOS — PERSISTENTE
 # =============================
+# IMPORTANTE: en Railway debes montar el volumen en /data
 DB_DIR = Path("/data")
 DB_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -47,24 +48,45 @@ MONTHS = ["enero","febrero","marzo","abril","mayo","junio","julio","agosto","sep
 # UTILIDADES BD
 # =============================
 def load_db() -> Dict[str, Any]:
-    if DB_PATH.exists():
-        try:
-            data = json.loads(DB_PATH.read_text(encoding="utf-8"))
+    """Carga el JSON de /data/series_data.json si existe, si no devuelve {}."""
+    try:
+        if DB_PATH.exists():
+            raw = DB_PATH.read_text(encoding="utf-8")
+            if not raw.strip():
+                print("[DB] Archivo vacío, usando {}")
+                return {}
+            data = json.loads(raw)
             if isinstance(data, dict):
+                print(f"[DB] Cargada BD desde {DB_PATH} con {len(data)} chats")
                 return data
-        except:
-            pass
-    return {}
+            else:
+                print("[DB] Contenido no dict, reseteando a {}")
+                return {}
+        else:
+            print(f"[DB] No existe {DB_PATH}, empezamos con BD vacía")
+            return {}
+    except Exception as e:
+        print(f"[DB] Error al leer BD: {e}")
+        return {}
 
 def save_db(db: Dict[str, Any]):
-    DB_DIR.mkdir(parents=True, exist_ok=True)
-    DB_PATH.write_text(json.dumps(db, ensure_ascii=False, indent=2), encoding="utf-8")
+    """Guarda el JSON en /data/series_data.json."""
+    try:
+        DB_DIR.mkdir(parents=True, exist_ok=True)
+        DB_PATH.write_text(
+            json.dumps(db, ensure_ascii=False, indent=2),
+            encoding="utf-8"
+        )
+        total_items = sum(len(v.get("items", [])) for v in db.values())
+        print(f"[DB] BD guardada en {DB_PATH} ({len(db)} chats, {total_items} series en total)")
+    except Exception as e:
+        print(f"[DB] ERROR guardando BD: {e}")
 
-def ensure_chat(db, cid):
+def ensure_chat(db: Dict[str, Any], cid: str):
     if cid not in db:
         db[cid] = {"items": []}
 
-def get_items(db, cid):
+def get_items(db: Dict[str, Any], cid: str):
     ensure_chat(db, cid)
     return db[cid]["items"]
 
@@ -100,17 +122,19 @@ def normalize(s: str) -> str:
 # =============================
 # ESTADO / PROGRESO
 # =============================
-def is_future(dstr):
+def is_future(dstr: Optional[str]) -> bool:
+    if not dstr:
+        return False
     try:
         return datetime.strptime(dstr, "%Y-%m-%d").date() > date.today()
-    except:
+    except Exception:
         return False
 
-def is_really_airing(details):
+def is_really_airing(details: Dict) -> bool:
     ne = details.get("next_episode_to_air") or {}
     return bool(ne.get("air_date") and is_future(ne["air_date"]))
 
-def emitted_season_numbers(details):
+def emitted_season_numbers(details: Dict) -> List[int]:
     emitted = set()
     today = date.today()
     for s in details.get("seasons") or []:
@@ -120,7 +144,7 @@ def emitted_season_numbers(details):
             try:
                 if datetime.strptime(ad, "%Y-%m-%d").date() <= today:
                     emitted.add(sn)
-            except:
+            except Exception:
                 pass
     if is_really_airing(details):
         ne = details["next_episode_to_air"]
@@ -149,6 +173,7 @@ def text_progress(emitted, completed):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📺 Bienvenido al bot de series.\n\n"
+        "Comandos disponibles:\n"
         "• /add <ID> S1S2\n"
         "• /add <Título> <Año?> S1S2\n"
         "• /lista\n"
@@ -163,7 +188,10 @@ async def add_series(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     args = context.args
     if not args:
-        await update.message.reply_text("Uso: /add <ID> S1S2 o /add <Título> 2022 S1S2")
+        await update.message.reply_text(
+            "Uso: /add <ID> S1S2 o /add <Título> 2022 S1S2\n"
+            "Ejemplo: /add La casa del dragón 2022 S1S2"
+        )
         return
 
     if re.fullmatch(r"\d+", args[0]):  # TMDB ID directo
@@ -171,26 +199,25 @@ async def add_series(update: Update, context: ContextTypes.DEFAULT_TYPE):
         seasons = parse_seasons_string("".join(args[1:]))
         try:
             d = tmdb_tv_details(tmdb_id)
-        except:
+        except Exception:
             await update.message.reply_text("ID no válido.")
             return
-        title = d.get("name")
+        title = d.get("name") or d.get("original_name") or f"TMDB {tmdb_id}"
         year = d.get("first_air_date", "").split("-")[0]
     else:
         # Búsqueda por título
-        title = None
-        year = None
         seasons_str = ""
 
         if re.search(r"[sS]\d+", args[-1]):
             seasons_str = args[-1]
             args = args[:-1]
 
+        year = None
         if args and re.fullmatch(r"\d{4}", args[-1]):
             year = args[-1]
             args = args[:-1]
 
-        title = " ".join(args)
+        title = " ".join(args).strip()
         seasons = parse_seasons_string(seasons_str)
 
         results = tmdb_search_tv(title).get("results", [])
@@ -199,27 +226,34 @@ async def add_series(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         if year:
-            match = next((r for r in results if r.get("first_air_date", "").startswith(year)), None)
-            if match:
-                result = match
-            else:
-                result = results[0]
+            match = next(
+                (r for r in results if (r.get("first_air_date") or "").startswith(year)),
+                None
+            )
+            result = match or results[0]
         else:
             result = results[0]
 
         tmdb_id = result["id"]
-        title = result["name"]
-        year = result.get("first_air_date", "").split("-")[0]
+        title = result.get("name") or title
+        year = (result.get("first_air_date") or "").split("-")[0]
 
     # Guardar o actualizar
     for it in items:
         if int(it["tmdb_id"]) == tmdb_id:
             it["completed"] = sorted(set(it.get("completed", []) + seasons))
+            it["title"] = title
+            it["year"] = year
             save_db(db)
             await update.message.reply_text(f"Actualizada: {title} ({year})")
             return
 
-    items.append({"tmdb_id": tmdb_id, "title": title, "year": year, "completed": seasons})
+    items.append({
+        "tmdb_id": tmdb_id,
+        "title": title,
+        "year": year,
+        "completed": seasons
+    })
     save_db(db)
     await update.message.reply_text(f"Añadida: {title} ({year})")
 
@@ -228,7 +262,10 @@ async def borrar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cid = str(update.effective_chat.id)
     items = get_items(db, cid)
 
-    q = " ".join(context.args).lower()
+    q = " ".join(context.args).strip().lower()
+    if not q:
+        await update.message.reply_text("Uso: /borrar <ID|título>")
+        return
 
     new = [i for i in items if not (q == str(i["tmdb_id"]) or normalize(i["title"]) == q)]
     if len(new) != len(items):
@@ -265,7 +302,7 @@ def make_keyboard(total, page):
 
     return InlineKeyboardMarkup(rows)
 
-async def list_series(update: Update, context: ContextTypes.DEFAULT_TYPE, page=0):
+async def list_series(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int = 0):
     db = load_db()
     cid = str(update.effective_chat.id)
     items = get_items(db, cid)
@@ -288,8 +325,11 @@ async def list_series(update: Update, context: ContextTypes.DEFAULT_TYPE, page=0
                 current = d["next_episode_to_air"]["season_number"]
             mini = mini_progress(emitted, completed, current)
             progress = text_progress(emitted, completed)
-            lines.append(f"{idx}. **{it['title']} ({it['year']})**\n{progress}\n🔸 {mini}")
-        except:
+            lines.append(
+                f"{idx}. **{it['title']} ({it['year']})**\n"
+                f"{progress}\n🔸 {mini}"
+            )
+        except Exception:
             lines.append(f"{idx}. {it['title']} ({it['year']})")
 
     kb = make_keyboard(len(items), page)
@@ -300,9 +340,46 @@ async def list_series(update: Update, context: ContextTypes.DEFAULT_TYPE, page=0
     )
 
 async def turn_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    page = int(update.callback_query.data.split(":")[1])
-    await update.callback_query.answer()
-    await list_series(update.callback_query, context, page)
+    """Maneja solo el cambio de página, sin reutilizar list_series con tipos raros."""
+    q = update.callback_query
+    await q.answer()
+    page = int(q.data.split(":")[1])
+
+    db = load_db()
+    cid = str(q.message.chat_id)
+    items = get_items(db, cid)
+
+    if not items:
+        await q.edit_message_text("Lista vacía.")
+        return
+
+    start = page * PAGE_SIZE
+    end = min(start + PAGE_SIZE, len(items))
+
+    lines = ["*Tus series:*"]
+    for idx, it in enumerate(items[start:end], start=start+1):
+        try:
+            d = tmdb_tv_details(int(it["tmdb_id"]))
+            emitted = emitted_season_numbers(d)
+            completed = it.get("completed", [])
+            current = None
+            if is_really_airing(d):
+                current = d["next_episode_to_air"]["season_number"]
+            mini = mini_progress(emitted, completed, current)
+            progress = text_progress(emitted, completed)
+            lines.append(
+                f"{idx}. **{it['title']} ({it['year']})**\n"
+                f"{progress}\n🔸 {mini}"
+            )
+        except Exception:
+            lines.append(f"{idx}. {it['title']} ({it['year']})")
+
+    kb = make_keyboard(len(items), page)
+    await q.edit_message_text(
+        "\n\n".join(lines),
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb
+    )
 
 async def show_series(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -316,9 +393,7 @@ async def show_series(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     title = d.get("name") or entry["title"]
     year = (d.get("first_air_date") or "").split("-")[0]
-
     overview = d.get("overview", "Sinopsis no disponible")
-
     poster = d.get("poster_path")
 
     emitted = emitted_season_numbers(d)
@@ -335,7 +410,11 @@ async def show_series(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
 
     if poster:
-        await q.message.reply_photo(IMG_BASE + poster, caption=caption, parse_mode=ParseMode.HTML)
+        await q.message.reply_photo(
+            IMG_BASE + poster,
+            caption=caption,
+            parse_mode=ParseMode.HTML
+        )
     else:
         await q.message.reply_text(caption, parse_mode=ParseMode.HTML)
 
@@ -343,6 +422,8 @@ async def show_series(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # MAIN
 # =============================
 def main():
+    print(f"[INIT] Usando BD en {DB_PATH}")
+    print(f"[INIT] Existe BD? {DB_PATH.exists()}")
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
