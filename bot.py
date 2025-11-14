@@ -31,9 +31,9 @@ if not TMDB_API_KEY:
     raise RuntimeError("❌ Falta la variable TMDB_API_KEY")
 
 # =============================
-# BASE DE DATOS PERSISTENTE
+# BASE DE DATOS PERSISTENTE (VOLUMEN)
 # =============================
-# Usa un volumen de Railway montado en: /mnt/series_db
+# Debe estar montado en Railway como volumen real
 DB_PATH = Path("/mnt/series_db/series_data.json")
 
 TMDB_BASE = "https://api.themoviedb.org/3"
@@ -63,8 +63,6 @@ def is_future(dstr: Optional[str]) -> bool:
         return False
 
 def load_db() -> Dict[str, Any]:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-
     if DB_PATH.exists():
         try:
             db = json.loads(DB_PATH.read_text(encoding="utf-8"))
@@ -79,8 +77,7 @@ def load_db() -> Dict[str, Any]:
         db["_auth"] = {}
 
     for k, v in list(db.items()):
-        if k == "_auth":
-            continue
+        if k == "_auth": continue
         if isinstance(v, list):
             db[k] = {"items": v}
         if isinstance(v, dict) and "items" not in v:
@@ -89,7 +86,6 @@ def load_db() -> Dict[str, Any]:
     return db
 
 def save_db(db):
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     DB_PATH.write_text(json.dumps(db, ensure_ascii=False, indent=2), encoding="utf-8")
 
 def ensure_chat(db, chat_id):
@@ -144,8 +140,7 @@ def emitted_season_numbers(details: Dict) -> List[int]:
 
     for s in seasons:
         sn = s.get("season_number")
-        if sn in (None, 0):
-            continue
+        if sn in (None, 0): continue
         ad = s.get("air_date")
         try:
             if ad and datetime.strptime(ad, "%Y-%m-%d").date() <= today:
@@ -156,8 +151,7 @@ def emitted_season_numbers(details: Dict) -> List[int]:
     if is_really_airing(details):
         ne = details.get("next_episode_to_air") or {}
         current = ne.get("season_number")
-        if current:
-            emitted.add(int(current))
+        if current: emitted.add(int(current))
 
     return sorted(emitted)
 
@@ -201,7 +195,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not db.get("_auth", {}).get(cid):
         await update.message.reply_text(
             "🔒 Bienvenido.\n"
-            "📋 Usa /lista para ver las series.\n"
+            "📋 Usa /lista.\n"
             "🔑 Si eres admin, envía la contraseña."
         )
         return
