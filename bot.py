@@ -328,7 +328,6 @@ def build_list_entry(it: Dict) -> str:
     emitted = emitted_season_numbers(d)
     completed = it.get("completed", [])
 
-    # SOLO marcamos temporada actual (🟢) si realmente está en emisión
     current = None
     if is_really_airing(d):
         ne = d.get("next_episode_to_air") or {}
@@ -364,12 +363,37 @@ async def list_series(update: Update, context: ContextTypes.DEFAULT_TYPE, page: 
         "\n\n".join(lines), parse_mode=ParseMode.MARKDOWN, reply_markup=kb
     )
 
+# =============================
+# CORRECCIÓN COMPLETA DE PAGINACIÓN
+# =============================
 async def turn_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
+
     page = int(q.data.split(":")[1])
 
-    return await list_series(q, context, page)
+    db = load_db()
+    cid = str(q.message.chat_id)
+    items = get_items(db, cid)
+
+    start = page * PAGE_SIZE
+    end = min(start + PAGE_SIZE, len(items))
+
+    lines = ["*Tus series:*"]
+    for idx, it in enumerate(items[start:end], start=start + 1):
+        try:
+            entry = build_list_entry(it)
+        except:
+            entry = f"{it['title']} ({it['year']})"
+        lines.append(f"{idx}. {entry}")
+
+    keyboard = make_list_keyboard(len(items), page)
+
+    await q.edit_message_text(
+        "\n\n".join(lines),
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=keyboard
+    )
 
 # =============================
 # FICHA
@@ -397,7 +421,6 @@ async def show_series(update: Update, context: ContextTypes.DEFAULT_TYPE):
     emitted = emitted_season_numbers(d)
     completed = entry.get("completed", [])
 
-    # Igual que en la lista: solo temporada actual si está en emisión
     current = None
     if is_really_airing(d):
         ne = d.get("next_episode_to_air") or {}
