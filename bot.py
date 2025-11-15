@@ -1,4 +1,4 @@
-#!/usr/bin/env python33
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # Bot de Telegram para gestionar una lista de series usando TMDB.
 # Versión SIN contraseña: todos los comandos son públicos.
@@ -327,7 +327,12 @@ def build_list_entry(it: Dict) -> str:
 
     emitted = emitted_season_numbers(d)
     completed = it.get("completed", [])
-    current = emitted[-1] if emitted else None
+
+    # SOLO marcamos temporada actual (🟢) si realmente está en emisión
+    current = None
+    if is_really_airing(d):
+        ne = d.get("next_episode_to_air") or {}
+        current = ne.get("season_number")
 
     mini = mini_progress(emitted, completed, current)
     progress = text_progress(emitted, completed)
@@ -392,7 +397,11 @@ async def show_series(update: Update, context: ContextTypes.DEFAULT_TYPE):
     emitted = emitted_season_numbers(d)
     completed = entry.get("completed", [])
 
-    current = emitted[-1] if emitted else None
+    # Igual que en la lista: solo temporada actual si está en emisión
+    current = None
+    if is_really_airing(d):
+        ne = d.get("next_episode_to_air") or {}
+        current = ne.get("season_number")
 
     mini = mini_progress(emitted, completed, current)
     progress = text_progress(emitted, completed)
