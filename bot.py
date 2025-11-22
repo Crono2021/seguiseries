@@ -180,13 +180,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /add <ID> S1S2\n"
         "• /add <Título> <Año?> S1S2\n"
         "• /lista\n"
-        "• /borrar <id|título>"
+        "• /borrar  (borrado interactivo)\n"
+        "• /borrartodo  (borra solo tus series)\n"
     )
 
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📺 Menú\n"
-        "/add • /lista • /borrar"
+        "/add • /lista • /borrar • /borrartodo"
     )
 
 # =============================
@@ -225,6 +226,7 @@ async def add_series(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cid = str(update.effective_chat.id)
     items = get_items(db, cid)
     args = context.args
+    user_id = update.effective_user.id if update.effective_user else None
 
     if not args:
         await update.message.reply_text("Uso: /add La casa del dragón 2022 S1S2")
@@ -253,50 +255,212 @@ async def add_series(update: Update, context: ContextTypes.DEFAULT_TYPE):
         title = result.get("name") or title
         year = (result.get("first_air_date") or "").split("-")[0]
 
+    # Actualizar si ya existe
     for it in items:
         if int(it["tmdb_id"]) == tmdb_id:
             it["completed"] = sorted(set((it.get("completed") or []) + seasons))
             it["title"] = title
             it["year"] = year
+            # Si no tenía propietario, se lo asignamos ahora
+            if "user_id" not in it and user_id is not None:
+                it["user_id"] = user_id
             save_db(db)
             await update.message.reply_text(f"Actualizada: {title} ({year})")
             return
 
-    items.append({
+    # Añadir nueva
+    new_item = {
         "tmdb_id": tmdb_id,
         "title": title,
         "year": year,
         "completed": seasons,
-    })
+    }
+    if user_id is not None:
+        new_item["user_id"] = user_id
+
+    items.append(new_item)
     save_db(db)
     await update.message.reply_text(f"Añadida: {title} ({year})")
 
 # =============================
-# BORRAR
+# BORRAR TODO (solo tus series)
 # =============================
-async def borrar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def borrartodo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = load_db()
     cid = str(update.effective_chat.id)
     items = get_items(db, cid)
-    q = " ".join(context.args).strip().lower()
+    user_id = update.effective_user.id if update.effective_user else None
 
-    if not q:
-        await update.message.reply_text("Uso: /borrar <título|id>")
+    if user_id is None:
+        await update.message.reply_text("No he podido identificar al usuario.")
         return
 
-    new = [i for i in items if not (q == str(i["tmdb_id"]) or normalize(i["title"]) == q)]
+    before = len(items)
+    # Solo borramos ítems que claramente pertenecen a este usuario
+    new_items = [it for it in items if it.get("user_id") != user_id]
+    deleted = before - len(new_items)
 
-    if len(new) < len(items):
-        db[cid]["items"] = new
+    if deleted == 0:
+        await update.message.reply_text("No tienes series propias para borrar.")
+        return
+
+    db[cid]["items"] = new_items
+    save_db(db)
+    await update.message.reply_text(f"🗑️ Se han borrado {deleted} de tus series.")
+
+# =============================
+# BORRAR (modo interactivo)
+# =============================
+def make_delete_keyboard(items: List[Dict], page: int) -> InlineKeyboardMarkup:
+    total = len(items)
+    if total == 0:
+        return InlineKeyboardMarkup([])
+
+    # Aseguramos que la página está en rango
+    max_page = (total - 1) // PAGE_SIZE
+    if page < 0:
+        page = 0
+    if page > max_page:
+        page = max_page
+
+    start = page * PAGE_SIZE
+    end = min(start + PAGE_SIZE, total)
+    rows = []
+
+    # Botones de serie (uno por fila)
+    for i in range(start, end):
+        title = items[i]["title"]
+        rows.append([
+            InlineKeyboardButton(
+                f"{i+1}. {title}",
+                callback_data=f"delitem:{i}:{page}"
+            )
+        ])
+
+    # Navegación
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️", callback_data=f"delpage:{page-1}"))
+    if end < total:
+        nav.append(InlineKeyboardButton("➡️", callback_data=f"delpage:{page+1}"))
+    if nav:
+        rows.append(nav)
+
+    # Botón terminar
+    rows.append([InlineKeyboardButton("TERMINAR", callback_data="delend")])
+
+    return InlineKeyboardMarkup(rows)
+
+async def borrar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Nuevo comportamiento: menú interactivo, sin argumentos
+    db = load_db()
+    cid = str(update.effective_chat.id)
+    items = get_items(db, cid)
+
+    if not items:
+        await update.message.reply_text("No hay series para borrar.")
+        return
+
+    page = 0
+    kb = make_delete_keyboard(items, page)
+    await update.message.reply_text(
+        "Pulsa sobre una serie para borrarla.\n"
+        "Puedes borrar varias. Cuando termines, pulsa TERMINAR.",
+        reply_markup=kb
+    )
+
+async def delete_turn_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    db = load_db()
+    cid = str(q.message.chat_id)
+    items = get_items(db, cid)
+
+    if not items:
+        await q.edit_message_text("No quedan series.")
+        return
+
+    try:
+        page = int(q.data.split(":")[1])
+    except:
+        page = 0
+
+    total = len(items)
+    max_page = (total - 1) // PAGE_SIZE
+    if page < 0:
+        page = 0
+    if page > max_page:
+        page = max_page
+
+    kb = make_delete_keyboard(items, page)
+    # Solo cambiamos el teclado; el texto de instrucciones se mantiene
+    await q.edit_message_reply_markup(reply_markup=kb)
+
+async def delete_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    db = load_db()
+    cid = str(q.message.chat_id)
+    items = get_items(db, cid)
+
+    parts = q.data.split(":")
+    if len(parts) < 3:
+        return
+
+    try:
+        idx = int(parts[1])
+        page = int(parts[2])
+    except:
+        return
+
+    if 0 <= idx < len(items):
+        deleted_title = items[idx]["title"]
+        del items[idx]
         save_db(db)
-        await update.message.reply_text("🗑️ Eliminada.")
+        await q.message.reply_text(f"🗑️ Borrada: {deleted_title}")
     else:
-        await update.message.reply_text("No encontrada.")
+        await q.message.reply_text("Esa serie ya no existe.")
+        # Re-dibujamos por si acaso
+        if items:
+            kb = make_delete_keyboard(items, 0)
+            await q.edit_message_reply_markup(reply_markup=kb)
+        else:
+            await q.edit_message_text("No quedan series.")
+        return
+
+    total = len(items)
+    if total == 0:
+        await q.edit_message_text("No quedan series.")
+        return
+
+    max_page = (total - 1) // PAGE_SIZE
+    if page > max_page:
+        page = max_page
+    if page < 0:
+        page = 0
+
+    kb = make_delete_keyboard(items, page)
+    await q.edit_message_reply_markup(reply_markup=kb)
+
+async def delete_end(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    await q.edit_message_text("✅ Operación de borrado terminada.")
 
 # =============================
 # LISTAR
 # =============================
 def make_list_keyboard(total: int, page: int) -> InlineKeyboardMarkup:
+    if total == 0:
+        return InlineKeyboardMarkup([])
+
+    # Normalizamos página para evitar problemas de índices
+    max_page = (total - 1) // PAGE_SIZE
+    if page < 0:
+        page = 0
+    if page > max_page:
+        page = max_page
+
     start = page * PAGE_SIZE
     end = min(start + PAGE_SIZE, total)
     rows = []
@@ -347,8 +511,15 @@ async def list_series(update: Update, context: ContextTypes.DEFAULT_TYPE, page: 
         await update.message.reply_text("Lista vacía.")
         return
 
+    total = len(items)
+    max_page = (total - 1) // PAGE_SIZE
+    if page < 0:
+        page = 0
+    if page > max_page:
+        page = max_page
+
     start = page * PAGE_SIZE
-    end = min(start + PAGE_SIZE, len(items))
+    end = min(start + PAGE_SIZE, total)
 
     lines = ["*Tus series:*"]
     for idx, it in enumerate(items[start:end], start=start+1):
@@ -370,11 +541,25 @@ async def turn_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
 
-    page = int(q.data.split(":")[1])
+    try:
+        page = int(q.data.split(":")[1])
+    except:
+        page = 0
 
     db = load_db()
     cid = str(q.message.chat_id)
     items = get_items(db, cid)
+
+    if not items:
+        await q.edit_message_text("Lista vacía.")
+        return
+
+    total = len(items)
+    max_page = (total - 1) // PAGE_SIZE
+    if page < 0:
+        page = 0
+    if page > max_page:
+        page = max_page
 
     start = page * PAGE_SIZE
     end = min(start + PAGE_SIZE, len(items))
@@ -405,7 +590,16 @@ async def show_series(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = load_db()
     cid = str(q.message.chat_id)
     items = get_items(db, cid)
-    idx = int(q.data.split(":")[1])
+    try:
+        idx = int(q.data.split(":")[1])
+    except:
+        await q.message.reply_text("Índice no válido.")
+        return
+
+    if idx < 0 or idx >= len(items):
+        await q.message.reply_text("Esa serie ya no existe en la lista.")
+        return
+
     entry = items[idx]
 
     tmdb_id = int(entry["tmdb_id"])
@@ -460,10 +654,17 @@ def main():
     app.add_handler(CommandHandler("menu", menu))
     app.add_handler(CommandHandler("add", add_series))
     app.add_handler(CommandHandler("borrar", borrar))
+    app.add_handler(CommandHandler("borrartodo", borrartodo))
     app.add_handler(CommandHandler("lista", list_series))
 
+    # Paginación lista
     app.add_handler(CallbackQueryHandler(turn_page, pattern="^page:"))
     app.add_handler(CallbackQueryHandler(show_series, pattern="^show:"))
+
+    # Borrado interactivo
+    app.add_handler(CallbackQueryHandler(delete_turn_page, pattern="^delpage:"))
+    app.add_handler(CallbackQueryHandler(delete_item, pattern="^delitem:"))
+    app.add_handler(CallbackQueryHandler(delete_end, pattern="^delend$"))
 
     app.run_polling()
 
