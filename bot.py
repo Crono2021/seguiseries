@@ -6,8 +6,8 @@
 import os
 import json, re, requests
 from pathlib import Path
-from datetime import datetime, date
-from typing import Dict, List, Optional, Any
+from datetime import date
+from typing import Dict, List, Any
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -28,19 +28,15 @@ if not TMDB_API_KEY:
     raise RuntimeError("❌ Falta la variable de entorno TMDB_API_KEY")
 
 # =============================
-# BASE DE DATOS (PERSISTENTE)
+# BASE DE DATOS
 # =============================
 DB_DIR = Path("/data")
 DB_DIR.mkdir(parents=True, exist_ok=True)
-
 DB_PATH = DB_DIR / "series_data.json"
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 IMG_BASE = "https://image.tmdb.org/t/p/"
 PAGE_SIZE = 10
-
-WEEKDAYS = ["lunes","martes","miércoles","jueves","viernes","sábado","domingo"]
-MONTHS = ["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"]
 
 # =============================
 # DB UTILS
@@ -48,85 +44,74 @@ MONTHS = ["enero","febrero","marzo","abril","mayo","junio","julio","agosto","sep
 def load_db() -> Dict[str, Any]:
     if DB_PATH.exists():
         try:
-            db = json.loads(DB_PATH.read_text(encoding="utf-8"))
+            db = json.loads(DB_PATH.read_text("utf-8"))
             if not isinstance(db, dict):
                 db = {}
         except:
             db = {}
     else:
         db = {}
-
-    for k, v in list(db.items()):
+    for k,v in list(db.items()):
         if isinstance(v, list):
             db[k] = {"items": v}
         elif isinstance(v, dict) and "items" not in v:
             v["items"] = v.get("items", [])
-
     return db
 
-def save_db(db: Dict[str, Any]) -> None:
-    DB_PATH.write_text(json.dumps(db, ensure_ascii=False, indent=2), encoding="utf-8")
+def save_db(db: Dict[str, Any]):
+    DB_PATH.write_text(
+        json.dumps(db, ensure_ascii=False, indent=2),
+        "utf-8"
+    )
 
-def ensure_chat(db: Dict[str, Any], chat_id: str) -> None:
-    if chat_id not in db:
-        db[chat_id] = {"items": []}
+def ensure_chat(db, cid):
+    if cid not in db:
+        db[cid] = {"items": []}
 
-def get_items(db: Dict[str, Any], chat_id: str):
-    ensure_chat(db, chat_id)
-    return db[chat_id]["items"]
+def get_items(db, cid):
+    ensure_chat(db, cid)
+    return db[cid]["items"]
 
 # =============================
 # TMDB
 # =============================
-def tmdb_tv_details(tmdb_id: int) -> Dict:
-    r = requests.get(
-        f"{TMDB_BASE}/tv/{tmdb_id}",
-        params={"api_key": TMDB_API_KEY, "language": "es-ES"},
-        timeout=20,
-    )
-    r.raise_for_status()
-    return r.json()
-
 def tmdb_search_tv(q: str) -> Dict:
     r = requests.get(
         f"{TMDB_BASE}/search/tv",
         params={"api_key": TMDB_API_KEY, "language": "es-ES", "query": q},
-        timeout=20,
+        timeout=20
+    )
+    r.raise_for_status()
+    return r.json()
+
+def tmdb_tv_details(tmdb_id: int) -> Dict:
+    r = requests.get(
+        f"{TMDB_BASE}/tv/{tmdb_id}",
+        params={"api_key": TMDB_API_KEY, "language": "es-ES"},
+        timeout=20
+    )
+    r.raise_for_status()
+    return r.json()
+
+def tmdb_watch_providers(tmdb_id: int) -> Dict:
+    r = requests.get(
+        f"{TMDB_BASE}/tv/{tmdb_id}/watch/providers",
+        params={"api_key": TMDB_API_KEY},
+        timeout=20
     )
     r.raise_for_status()
     return r.json()
 
 # =============================
-# MÉTODOS UTILES
+# UTILS
 # =============================
 def parse_seasons_string(s: str) -> List[int]:
     return sorted({int(x) for x in re.findall(r"[sS](\d+)", s or "")})
 
-def normalize(s: str) -> str:
-    return re.sub(r"\s+", " ", (s or "").strip().lower())
-
-def emitted_season_numbers(details: Dict) -> List[int]:
-    seasons = details.get("seasons") or []
-    emitted = set()
-    today = date.today()
-
-    for s in seasons:
-        sn = s.get("season_number")
-        if not sn or sn == 0:
-            continue
-        ad = s.get("air_date")
-        try:
-            if ad and datetime.strptime(ad, "%Y-%m-%d").date() <= today:
-                emitted.add(sn)
-        except:
-            pass
-
-    return sorted(emitted)
-
 # =============================
-# START / MENU
+# START
 # =============================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(update, context):
     await update.message.reply_text(
         "📺 *Bienvenido*\n\n"
         "Comandos disponibles:\n"
@@ -134,71 +119,67 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /lista — Ver tus series\n"
         "• /borrar — Borrado interactivo\n"
         "• /borrartodo — Borra solo tus series\n"
-        "➕ *Nuevo:* /caratula <título> — envía la carátula en máxima calidad\n",
+        "• /caratula <título> — Carátula en máxima calidad\n"
+        "• /ficha <título> — Ficha completa de una *serie*\n",
         parse_mode=ParseMode.MARKDOWN
     )
 
 # =============================
 # ADD
 # =============================
-async def add_series(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def add_series(update, context):
     db = load_db()
     cid = str(update.effective_chat.id)
     items = get_items(db, cid)
+
     args = context.args
-    user_id = update.effective_user.id
+    uid = update.effective_user.id
 
     if not args:
         await update.message.reply_text("Uso: /add La casa del dragón 2022 S1S2")
         return
 
-    # Si empieza por número → ID
+    # Si empieza por ID
     if re.fullmatch(r"\d+", args[0]):
         tmdb_id = int(args[0])
-        seasons = parse_seasons_string("".join(args[1:]))
-
+        seasons = parse_seasons_string(" ".join(args[1:]))
         try:
             d = tmdb_tv_details(tmdb_id)
         except:
-            await update.message.reply_text("❌ ID inválido.")
+            await update.message.reply_text("ID inválido.")
             return
-
         title = d.get("name")
         year = (d.get("first_air_date") or "").split("-")[0]
-
     else:
-        # Búsqueda por título
         q = " ".join(args)
         res = tmdb_search_tv(q)
         results = res.get("results", [])
         if not results:
             await update.message.reply_text("No encontrado.")
             return
-
-        data = results[0]
-        tmdb_id = int(data["id"])
-        title = data["name"]
-        year = (data.get("first_air_date") or "").split("-")[0]
+        s = results[0]
+        tmdb_id = s["id"]
+        title = s["name"]
+        year = (s.get("first_air_date") or "").split("-")[0]
         seasons = parse_seasons_string(q)
 
-    # Actualizar si ya existe
+    # Actualizar si existe
     for it in items:
         if int(it["tmdb_id"]) == tmdb_id:
             it["completed"] = sorted(set(it.get("completed", []) + seasons))
             it["title"] = title
             it["year"] = year
-            it["user_id"] = user_id
+            it["user_id"] = uid
             save_db(db)
             await update.message.reply_text(f"Actualizada: {title}")
             return
 
-    # Añadir
     items.append({
         "tmdb_id": tmdb_id,
         "title": title,
         "year": year,
         "completed": seasons,
-        "user_id": user_id
+        "user_id": uid
     })
 
     save_db(db)
@@ -207,7 +188,7 @@ async def add_series(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =============================
 # CARÁTULA
 # =============================
-async def caratula(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def caratula(update, context):
     if not context.args:
         await update.message.reply_text("Uso: /caratula <título>")
         return
@@ -221,7 +202,7 @@ async def caratula(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     s = results[0]
-    title = s.get("name")
+    title = s["name"]
     poster = s.get("poster_path")
 
     if not poster:
@@ -231,24 +212,80 @@ async def caratula(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = f"{IMG_BASE}original{poster}"
 
     await update.message.reply_photo(
-        photo=url,
-        caption=f"<b>{title}</b>",
-        parse_mode=ParseMode.HTML
+        url, caption=f"<b>{title}</b>", parse_mode=ParseMode.HTML
     )
+
+# =============================
+# FICHA (SOLO SERIES)
+# =============================
+async def ficha(update, context):
+    if not context.args:
+        await update.message.reply_text("Uso: /ficha <título>")
+        return
+
+    q = " ".join(context.args)
+    res = tmdb_search_tv(q)
+    results = res.get("results", [])
+
+    if not results:
+        await update.message.reply_text("No encontrado.")
+        return
+
+    s = results[0]
+    tmdb_id = s["id"]
+    details = tmdb_tv_details(tmdb_id)
+
+    title = details.get("name")
+    year = (details.get("first_air_date") or "").split("-")[0]
+    score = details.get("vote_average") or 0
+    genres = ", ".join(g["name"] for g in details.get("genres", [])) or "Desconocido"
+    overview = details.get("overview") or "Sin sinopsis."
+
+    # PROVIDERS (ESPAÑA)
+    prov = tmdb_watch_providers(tmdb_id)
+    pl = prov.get("results", {}).get("ES", {})
+    plataforma = "Desconocida"
+
+    if "flatrate" in pl and pl["flatrate"]:
+        plataforma = ", ".join(p["provider_name"] for p in pl["flatrate"])
+    elif "rent" in pl and pl["rent"]:
+        plataforma = ", ".join(p["provider_name"] for p in pl["rent"])
+    elif "buy" in pl and pl["buy"]:
+        plataforma = ", ".join(p["provider_name"] for p in pl["buy"])
+
+    poster = details.get("poster_path")
+    url = f"{IMG_BASE}original{poster}" if poster else None
+
+    caption = (
+        f"<b>{title} ({year})</b>\n\n"
+        f"⭐ <b>Puntuación TMDB:</b> {score}/10\n"
+        f"🎭 <b>Géneros:</b> {genres}\n"
+        f"📺 <b>Plataforma:</b> {plataforma}\n\n"
+        f"{overview}"
+    )
+
+    if url:
+        await update.message.reply_photo(
+            url, caption=caption, parse_mode=ParseMode.HTML
+        )
+    else:
+        await update.message.reply_text(
+            caption, parse_mode=ParseMode.HTML
+        )
 
 # =============================
 # BORRARTODO
 # =============================
-async def borrartodo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def borrartodo(update, context):
     db = load_db()
     cid = str(update.effective_chat.id)
     items = get_items(db, cid)
-
     uid = update.effective_user.id
-    new_items = [s for s in items if s.get("user_id") != uid]
-    deleted = len(items) - len(new_items)
 
-    db[cid]["items"] = new_items
+    new = [s for s in items if s.get("user_id") != uid]
+    deleted = len(items) - len(new)
+
+    db[cid]["items"] = new
     save_db(db)
 
     await update.message.reply_text(f"🗑️ Se han borrado {deleted} de tus series.")
@@ -258,15 +295,14 @@ async def borrartodo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =============================
 def make_delete_keyboard(items, page):
     total = len(items)
-    max_page = max((total - 1) // PAGE_SIZE, 0)
-    page = max(0, min(page, max_page))
+    max_page = max((total-1)//PAGE_SIZE,0)
+    page = max(0,min(page,max_page))
 
-    start = page * PAGE_SIZE
-    end = min(start + PAGE_SIZE, total)
+    start = page*PAGE_SIZE
+    end = min(start+PAGE_SIZE,total)
 
     rows = []
-
-    for i in range(start, end):
+    for i in range(start,end):
         rows.append([
             InlineKeyboardButton(
                 f"{i+1}. {items[i]['title']}",
@@ -274,125 +310,119 @@ def make_delete_keyboard(items, page):
             )
         ])
 
-    nav = []
-    if page > 0:
-        nav.append(InlineKeyboardButton("⬅️", callback_data=f"delpage:{page-1}"))
-    if end < total:
-        nav.append(InlineKeyboardButton("➡️", callback_data=f"delpage:{page+1}"))
+    nav=[]
+    if page>0:
+        nav.append(InlineKeyboardButton("⬅️",callback_data=f"delpage:{page-1}"))
+    if end<total:
+        nav.append(InlineKeyboardButton("➡️",callback_data=f"delpage:{page+1}"))
     if nav:
         rows.append(nav)
 
-    rows.append([InlineKeyboardButton("TERMINAR", callback_data="delend")])
+    rows.append([InlineKeyboardButton("TERMINAR",callback_data="delend")])
     return InlineKeyboardMarkup(rows)
 
 async def borrar(update, context):
-    db = load_db()
-    cid = str(update.effective_chat.id)
-    items = get_items(db, cid)
+    db=load_db()
+    cid=str(update.effective_chat.id)
+    items=get_items(db,cid)
 
     if not items:
         await update.message.reply_text("No hay series para borrar.")
         return
 
-    kb = make_delete_keyboard(items, 0)
+    kb=make_delete_keyboard(items,0)
     await update.message.reply_text(
-        "Pulsa una serie para borrarla.\nPulsa TERMINAR cuando acabes.",
+        "Pulsa una serie para borrarla. Pulsa TERMINAR cuando acabes.",
         reply_markup=kb
     )
 
 async def delete_turn_page(update, context):
-    q = update.callback_query
+    q=update.callback_query
     await q.answer()
 
-    db = load_db()
-    cid = str(q.message.chat.id)
-    items = get_items(db, cid)
+    db=load_db()
+    cid=str(q.message.chat.id)
+    items=get_items(db,cid)
 
-    page = int(q.data.split(":")[1])
-    kb = make_delete_keyboard(items, page)
+    page=int(q.data.split(":")[1])
+    kb=make_delete_keyboard(items,page)
     await q.edit_message_reply_markup(reply_markup=kb)
 
 async def delete_item(update, context):
-    q = update.callback_query
+    q=update.callback_query
     await q.answer()
 
-    db = load_db()
-    cid = str(q.message.chat.id)
-    items = get_items(db, cid)
+    db=load_db()
+    cid=str(q.message.chat.id)
+    items=get_items(db,cid)
 
-    _, idx, page = q.data.split(":")
-    idx = int(idx)
-    page = int(page)
+    _,idx,page = q.data.split(":")
+    idx=int(idx); page=int(page)
 
     if idx < len(items):
-        name = items[idx]["title"]
         del items[idx]
         save_db(db)
-        await q.message.reply_text(f"🗑️ Borrada: {name}")
+        await q.message.reply_text("🗑️ Serie borrada.")
 
-    # Redibujar menú
     if not items:
         await q.edit_message_text("No quedan series.")
         return
 
-    kb = make_delete_keyboard(items, page)
+    kb=make_delete_keyboard(items,page)
     await q.edit_message_reply_markup(reply_markup=kb)
 
 async def delete_end(update, context):
-    q = update.callback_query
+    q=update.callback_query
     await q.answer()
-    await q.edit_message_text("✔ Borrado terminado.")
+    await q.edit_message_text("✔️ Borrado terminado.")
 
 # =============================
 # LISTAR
 # =============================
-def make_list_keyboard(total, page):
-    max_page = max((total - 1) // PAGE_SIZE, 0)
-    page = max(0, min(page, max_page))
+def make_list_keyboard(total,page):
+    max_page=max((total-1)//PAGE_SIZE,0)
+    page=max(0,min(page,max_page))
 
-    start = page * PAGE_SIZE
-    end = min(start + PAGE_SIZE, total)
+    start=page*PAGE_SIZE
+    end=min(start+PAGE_SIZE,total)
 
-    rows = []
-
+    rows=[]
     rows.append([
-        InlineKeyboardButton(
-            str(i + 1),
-            callback_data=f"show:{i}"
-        ) for i in range(start, end)
+        InlineKeyboardButton(str(i+1),callback_data=f"show:{i}")
+        for i in range(start,end)
     ])
 
-    nav = []
-    if page > 0:
-        nav.append(InlineKeyboardButton("⬅️", callback_data=f"page:{page-1}"))
-    if end < total:
-        nav.append(InlineKeyboardButton("➡️", callback_data=f"page:{page+1}"))
+    nav=[]
+    if page>0:
+        nav.append(InlineKeyboardButton("⬅️",callback_data=f"page:{page-1}"))
+    if end<total:
+        nav.append(InlineKeyboardButton("➡️",callback_data=f"page:{page+1}"))
     if nav:
         rows.append(nav)
 
     return InlineKeyboardMarkup(rows)
 
 async def list_series(update, context, page=0):
-    db = load_db()
-    cid = str(update.effective_chat.id)
-    items = get_items(db, cid)
+    db=load_db()
+    cid=str(update.effective_chat.id)
+    items=get_items(db,cid)
 
     if not items:
         await update.message.reply_text("Lista vacía.")
         return
 
-    total = len(items)
-    max_page = max((total - 1) // PAGE_SIZE, 0)
-    page = max(0, min(page, max_page))
+    total=len(items)
+    max_page=max((total-1)//PAGE_SIZE,0)
+    page=max(0,min(page,max_page))
 
-    start = page * PAGE_SIZE
-    end = min(start + PAGE_SIZE, total)
+    start=page*PAGE_SIZE
+    end=min(start+PAGE_SIZE,total)
 
-    lines = ["*Tus series:*"]
-    for idx, it in enumerate(items[start:end], start + 1):
+    lines=["*Tus series:*"]
+    for idx,it in enumerate(items[start:end],start+1):
         lines.append(f"{idx}. {it['title']} ({it['year']})")
 
-    kb = make_list_keyboard(total, page)
+    kb=make_list_keyboard(total,page)
 
     await update.message.reply_text(
         "\n".join(lines),
@@ -401,27 +431,27 @@ async def list_series(update, context, page=0):
     )
 
 async def turn_page(update, context):
-    q = update.callback_query
+    q=update.callback_query
     await q.answer()
 
-    page = int(q.data.split(":")[1])
+    page=int(q.data.split(":")[1])
 
-    db = load_db()
-    cid = str(q.message.chat.id)
-    items = get_items(db, cid)
+    db=load_db()
+    cid=str(q.message.chat.id)
+    items=get_items(db,cid)
 
-    total = len(items)
-    max_page = max((total - 1) // PAGE_SIZE, 0)
-    page = max(0, min(page, max_page))
+    total=len(items)
+    max_page=max((total-1)//PAGE_SIZE,0)
+    page=max(0,min(page,max_page))
 
-    start = page * PAGE_SIZE
-    end = min(start + PAGE_SIZE, total)
+    start=page*PAGE_SIZE
+    end=min(start+PAGE_SIZE,total)
 
-    lines = ["*Tus series:*"]
-    for idx, it in enumerate(items[start:end], start + 1):
+    lines=["*Tus series:*"]
+    for idx,it in enumerate(items[start:end],start+1):
         lines.append(f"{idx}. {it['title']} ({it['year']})")
 
-    kb = make_list_keyboard(total, page)
+    kb=make_list_keyboard(total,page)
 
     await q.edit_message_text(
         "\n".join(lines),
@@ -441,13 +471,12 @@ def main():
     app.add_handler(CommandHandler("borrar", borrar))
     app.add_handler(CommandHandler("borrartodo", borrartodo))
     app.add_handler(CommandHandler("caratula", caratula))
+    app.add_handler(CommandHandler("ficha", ficha))
 
     app.add_handler(CallbackQueryHandler(turn_page, pattern="^page:"))
     app.add_handler(CallbackQueryHandler(delete_turn_page, pattern="^delpage:"))
     app.add_handler(CallbackQueryHandler(delete_item, pattern="^delitem:"))
     app.add_handler(CallbackQueryHandler(delete_end, pattern="^delend$"))
-    app.add_handler(CallbackQueryHandler(turn_page, pattern="^page:"))
-    app.add_handler(CallbackQueryHandler(lambda u,c:None, pattern="^show:"))  # Ficha opcional
 
     app.run_polling()
 
