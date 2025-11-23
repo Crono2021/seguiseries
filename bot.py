@@ -296,7 +296,6 @@ async def borrartodo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     before = len(items)
-    # Solo borramos ítems que claramente pertenecen a este usuario
     new_items = [it for it in items if it.get("user_id") != user_id]
     deleted = before - len(new_items)
 
@@ -316,7 +315,6 @@ def make_delete_keyboard(items: List[Dict], page: int) -> InlineKeyboardMarkup:
     if total == 0:
         return InlineKeyboardMarkup([])
 
-    # Aseguramos que la página está en rango
     max_page = (total - 1) // PAGE_SIZE
     if page < 0:
         page = 0
@@ -327,7 +325,6 @@ def make_delete_keyboard(items: List[Dict], page: int) -> InlineKeyboardMarkup:
     end = min(start + PAGE_SIZE, total)
     rows = []
 
-    # Botones de serie (uno por fila)
     for i in range(start, end):
         title = items[i]["title"]
         rows.append([
@@ -337,7 +334,6 @@ def make_delete_keyboard(items: List[Dict], page: int) -> InlineKeyboardMarkup:
             )
         ])
 
-    # Navegación
     nav = []
     if page > 0:
         nav.append(InlineKeyboardButton("⬅️", callback_data=f"delpage:{page-1}"))
@@ -346,13 +342,11 @@ def make_delete_keyboard(items: List[Dict], page: int) -> InlineKeyboardMarkup:
     if nav:
         rows.append(nav)
 
-    # Botón terminar
     rows.append([InlineKeyboardButton("TERMINAR", callback_data="delend")])
 
     return InlineKeyboardMarkup(rows)
 
 async def borrar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Nuevo comportamiento: menú interactivo, sin argumentos
     db = load_db()
     cid = str(update.effective_chat.id)
     items = get_items(db, cid)
@@ -373,7 +367,7 @@ async def delete_turn_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     db = load_db()
-    cid = str(q.message.chat_id)
+    cid = str(q.message.chat.id)   # 🔧 CORREGIDO
     items = get_items(db, cid)
 
     if not items:
@@ -393,14 +387,13 @@ async def delete_turn_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
         page = max_page
 
     kb = make_delete_keyboard(items, page)
-    # Solo cambiamos el teclado; el texto de instrucciones se mantiene
     await q.edit_message_reply_markup(reply_markup=kb)
 
 async def delete_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     db = load_db()
-    cid = str(q.message.chat_id)
+    cid = str(q.message.chat.id)   # 🔧 CORREGIDO
     items = get_items(db, cid)
 
     parts = q.data.split(":")
@@ -420,7 +413,6 @@ async def delete_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.message.reply_text(f"🗑️ Borrada: {deleted_title}")
     else:
         await q.message.reply_text("Esa serie ya no existe.")
-        # Re-dibujamos por si acaso
         if items:
             kb = make_delete_keyboard(items, 0)
             await q.edit_message_reply_markup(reply_markup=kb)
@@ -454,7 +446,6 @@ def make_list_keyboard(total: int, page: int) -> InlineKeyboardMarkup:
     if total == 0:
         return InlineKeyboardMarkup([])
 
-    # Normalizamos página para evitar problemas de índices
     max_page = (total - 1) // PAGE_SIZE
     if page < 0:
         page = 0
@@ -535,7 +526,7 @@ async def list_series(update: Update, context: ContextTypes.DEFAULT_TYPE, page: 
     )
 
 # =============================
-# CORRECCIÓN COMPLETA DE PAGINACIÓN
+# PAGINACIÓN LISTA NORMAL
 # =============================
 async def turn_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -547,7 +538,7 @@ async def turn_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
         page = 0
 
     db = load_db()
-    cid = str(q.message.chat_id)
+    cid = str(q.message.chat.id)   # 🔧 CORREGIDO
     items = get_items(db, cid)
 
     if not items:
@@ -588,7 +579,7 @@ async def show_series(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
 
     db = load_db()
-    cid = str(q.message.chat_id)
+    cid = str(q.message.chat.id)   # 🔧 CORREGIDO
     items = get_items(db, cid)
     try:
         idx = int(q.data.split(":")[1])
@@ -657,7 +648,7 @@ def main():
     app.add_handler(CommandHandler("borrartodo", borrartodo))
     app.add_handler(CommandHandler("lista", list_series))
 
-    # Paginación lista
+    # Paginación lista normal
     app.add_handler(CallbackQueryHandler(turn_page, pattern="^page:"))
     app.add_handler(CallbackQueryHandler(show_series, pattern="^show:"))
 
